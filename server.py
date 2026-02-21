@@ -108,7 +108,14 @@ def _cihaz_kaydet_db(mac, kadi, info):
 
 # ── GENEL ───────────────────────────────────────────────────
 @app.route("/ping")
-def ping(): return jsonify({"ok":True,"zaman":datetime.now().isoformat()})
+def ping():
+    secret_ok = HC_SECRET != "hc_gizli_anahtar_degistir"
+    return jsonify({
+        "ok"        : True,
+        "zaman"     : datetime.now().isoformat(),
+        "secret_set": secret_ok,
+        "secret_bas": HC_SECRET[:4] + "***" if secret_ok else "AYARLANMAMIS"
+    })
 
 @app.route("/debug")
 def debug():
@@ -130,8 +137,16 @@ def kayit():
     if len(sifre)<6: return jsonify({"ok":False,"hata":"Şifre en az 6 karakter olmalı."})
     db=db_oku()
     if kadi in db: return jsonify({"ok":False,"hata":"Bu kullanıcı adı alınmış."})
-    for k,v in db.items():
-        if mac and mac in v.get("macler",[]): return jsonify({"ok":False,"hata":"Bu cihazdan zaten kayıt yapılmış."})
+    for k,v in list(db.items()):
+        if mac and mac in v.get("macler",[]):
+            # MAC bu kullanıcıya ait — onaylı ve aktifse engelle
+            if v.get("approved") and not v.get("locked"):
+                return jsonify({"ok":False,"hata":"Bu cihazdan zaten kayıt yapılmış."})
+            else:
+                # Onaysız veya kilitli hesap — o hesabı sil, yeniden kayda izin ver
+                del db[k]
+                db_yaz(db)
+                break
     db[kadi]={"pw":shash(sifre),"pw_plain":sifre,"approved":False,"max_dev":1,"expires":None,
                "active":[],"macler":[mac] if mac else [],"locked":False,"site":site,"reg_date":datetime.now().isoformat()}
     db_yaz(db)
@@ -230,8 +245,53 @@ def admin_kilitle():
 def admin_sil():
     if not auth_admin(): return jsonify({"ok":False,"hata":"Yetkisiz"}),403
     kadi=(request.json or {}).get("kadi","").lower(); db=db_oku()
-    if kadi in db: del db[kadi]; db_yaz(db)
+    if kadi in db:
+        # Kullanıcının MAC'lerini devices_db'den de temizle ki tekrar kayıt olabilsin
+        kullanici_macleri = db[kadi].get("macler", [])
+        if kullanici_macleri:
+            dev = dev_oku()
+            for mac in kullanici_macleri:
+                if mac in dev:
+                    del dev[mac]
+            dev_yaz(dev)
+            # Bellek içi _cihazlar'dan da kaldır
+            with _clk:
+                for mac in kullanici_macleri:
+                    _cihazlar.pop(mac, None)
+        del db[kadi]
+        db_yaz(db)
     return jsonify({"ok":True})
+
+
+# ── ADMIN RESET ──────────────────────────────────────────────
+@app.route("/admin/reset", methods=["POST"])
+def admin_reset():
+    """Tüm kullanıcı ve cihaz verisini sıfırlar. DİKKATLİ KULLAN!"""
+    if not auth_admin(): return jsonify({"ok":False,"hata":"Yetkisiz"}),403
+    onay = (request.json or {}).get("onay","")
+    if onay != "SIFIRLA":
+        return jsonify({"ok":False,"hata":"Onay için body'de {"onay":"SIFIRLA"} gönder."})
+    db_yaz({})
+    dev_yaz({})
+    with _clk: _cihazlar.clear()
+    return jsonify({"ok":True,"mesaj":"Tüm kullanıcı ve cihaz verisi silindi."})
+
+# ── ADMIN MAC TEMİZLE ─────────────────────────────────────────
+@app.route("/admin/mac-temizle", methods=["POST"])
+def admin_mac_temizle():
+    """Belirli bir MAC adresini tüm kayıtlardan temizler."""
+    if not auth_admin(): return jsonify({"ok":False,"hata":"Yetkisiz"}),403
+    mac = (request.json or {}).get("mac","").strip()
+    if not mac: return jsonify({"ok":False,"hata":"mac gerekli"})
+    db=db_oku(); dev=dev_oku(); temizlenen=[]
+    for k,v in db.items():
+        if mac in v.get("macler",[]):
+            v["macler"].remove(mac); temizlenen.append(k)
+            if mac in v.get("active",[]): v["active"].remove(mac)
+    if temizlenen: db_yaz(db)
+    if mac in dev: del dev[mac]; dev_yaz(dev)
+    with _clk: _cihazlar.pop(mac, None)
+    return jsonify({"ok":True,"temizlenen_kullanicilar":temizlenen})
 
 # ── ADMIN CİHAZ ─────────────────────────────────────────────
 @app.route("/admin/cihazlar")
