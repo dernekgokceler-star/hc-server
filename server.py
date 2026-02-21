@@ -18,6 +18,9 @@ DATA_PATH.mkdir(parents=True, exist_ok=True)
 
 USERS_FILE   = DATA_PATH / "users_db.json"
 DEVICES_FILE = DATA_PATH / "devices_db.json"
+TARAMA_FILE  = DATA_PATH / "taramalar.json"
+TARAMA_FILES = DATA_PATH / "tarama_dosyalar"
+TARAMA_FILES.mkdir(parents=True, exist_ok=True)
 
 _lock = threading.Lock()
 _clk  = threading.Lock()
@@ -42,6 +45,10 @@ def dev_oku():
     with _lock: return oku(DEVICES_FILE)
 def dev_yaz(d):
     with _lock: yaz(DEVICES_FILE, d)
+def tarama_oku():
+    with _lock: return oku(TARAMA_FILE)
+def tarama_yaz(d):
+    with _lock: yaz(TARAMA_FILE, d)
 
 def auth_bot():
     s = request.headers.get("X-HC-Secret") or request.args.get("secret","")
@@ -298,6 +305,60 @@ def komut_liste():
         liste=[{"mac":mac,"hostname":v["hostname"],"kullanici":v["kullanici"],
                 "son_gorulme":v["son_gorulme"],"bekleyen":len(v["komutlar"])} for mac,v in _cihazlar.items()]
     return jsonify({"ok":True,"cihazlar":liste})
+
+# ── TARAMA SONUÇLARI ─────────────────────────────────────────
+@app.route("/tarama/sonuc", methods=["POST"])
+def tarama_sonuc():
+    if not auth_bot(): return jsonify({"ok":False,"hata":"Yetkisiz"}),403
+    d=request.json or {}
+    mac=d.get("mac",""); kadi=d.get("kadi","?")
+    tarih=d.get("tarih",datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    tid=str(uuid.uuid4())[:8]
+
+    kayit={
+        "id"      : tid,
+        "mac"     : mac,
+        "kadi"    : kadi,
+        "hedef"   : d.get("hedef",""),
+        "site_adi": d.get("site_adi",""),
+        "tarih"   : tarih,
+        "toplam"  : d.get("toplam",0),
+        "basarili": d.get("basarili",0),
+        "hatali"  : d.get("hatali",0),
+        "bos"     : d.get("bos",0),
+    }
+
+    # Her txt'i ayrı dosyaya kaydet
+    klasor = TARAMA_FILES / tid
+    klasor.mkdir(parents=True, exist_ok=True)
+    for alan,dosya in [("basarili_txt","basarili.txt"),("hatali_txt","hatali.txt"),("bos_txt","bos.txt")]:
+        icerik=d.get(alan,"")
+        if icerik:
+            (klasor/dosya).write_text(icerik, encoding="utf-8")
+
+    db=tarama_oku()
+    if kadi not in db: db[kadi]=[]
+    db[kadi].insert(0,kayit)
+    db[kadi]=db[kadi][:100]
+    tarama_yaz(db)
+    return jsonify({"ok":True,"id":tid})
+
+@app.route("/admin/taramalar")
+def admin_taramalar():
+    if not auth_admin(): return jsonify({"ok":False,"hata":"Yetkisiz"}),403
+    kadi=request.args.get("kadi","")
+    db=tarama_oku()
+    if kadi: return jsonify({"ok":True,"taramalar":{kadi:db.get(kadi,[])}})
+    return jsonify({"ok":True,"taramalar":db})
+
+@app.route("/admin/tarama/dosya/<tarama_id>/<dosya>")
+def admin_tarama_dosya(tarama_id,dosya):
+    if not auth_admin(): return jsonify({"ok":False,"hata":"Yetkisiz"}),403
+    if dosya not in ("basarili.txt","hatali.txt","bos.txt"):
+        return jsonify({"ok":False,"hata":"Geçersiz"}),400
+    p=TARAMA_FILES/tarama_id/dosya
+    if not p.exists(): return jsonify({"ok":True,"icerik":""})
+    return jsonify({"ok":True,"icerik":p.read_text(encoding="utf-8")})
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",5000))
